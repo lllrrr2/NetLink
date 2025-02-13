@@ -13,9 +13,8 @@ defaults:
     # necessary for windows
     shell: bash
 permissions:
-  contents: write
-  packages: write
-
+  contents: write 
+  packages: write  # 允许写入 GitHub Container Registry (GHCR)
 jobs:
   #  test:
   #    runs-on: ubuntu-latest
@@ -55,6 +54,9 @@ jobs:
             OS: ubuntu-latest
             FEATURES: default
           - TARGET: armv7-unknown-linux-musleabi # raspberry pi 2-3-4, not tested
+            OS: ubuntu-latest
+            FEATURES: default
+          - TARGET: armv7-unknown-linux-gnueabihf # 群晖ds-213j
             OS: ubuntu-latest
             FEATURES: default
           - TARGET: arm-unknown-linux-musleabihf # raspberry pi 0-1, not tested
@@ -174,6 +176,10 @@ jobs:
               armv7-unknown-linux-musleabi)
                 MUSL_URI=armv7m-linux-musleabi-cross
                 ;; 
+              armv7-unknown-linux-gnueabihf)
+                wget -q -c https://github.com/lmq8267/vnt/releases/download/1.2.1/armada370-gcc493_glibc220_hard-GPL.txz -P /opt/
+                tar -Jxf /opt/armada370-gcc493_glibc220_hard-GPL.txz -C /opt/
+                ;;  
               arm-unknown-linux-musleabihf)
                 MUSL_URI=arm-linux-musleabihf-cross
                 ;;    
@@ -195,6 +201,9 @@ jobs:
             fi
           fi
           if [[ $TARGET =~ ^mips.*$ ]]; then
+            # mips平台使用1.71.1版本
+            #rustup install 1.71.1
+            #rustup default 1.71.1
             cd /opt/musl_gcc/${URL}-cross/lib/gcc/${URL}/11.2.1
             cp libgcc_eh.a libunwind.a
             rustup toolchain install nightly-x86_64-unknown-linux-gnu
@@ -223,6 +232,9 @@ jobs:
           [target.armv7-unknown-linux-musleabi]
           linker = "armv7m-linux-musleabi-gcc"
           rustflags = ["-C", "target-feature=+crt-static","-C", "strip=symbols","-C","link-dead-code"]
+          [target.armv7-unknown-linux-gnueabihf]
+          linker = "/opt/arm-unknown-linux-gnueabi/bin/arm-unknown-linux-gnueabi-gcc"
+          rustflags = ["-C", "strip=symbols","-C","link-dead-code"]
           [target.arm-unknown-linux-musleabihf]
           linker = "arm-linux-musleabihf-gcc"
           rustflags = ["-C", "target-feature=+crt-static","-C", "strip=symbols","-C","link-dead-code"]   
@@ -273,9 +285,9 @@ jobs:
         if: ${{ runner.os == 'Linux' && !endsWith(matrix.target, 'freebsd') && !endsWith(matrix.target, 'gnueabihf') }}
         uses: crazy-max/ghaction-upx@v3
         with:
-          version: latest
-          install-only: true
-      - name: UPX
+         version: latest
+         install-only: true
+      - name: UPX 
         if: ${{ runner.os == 'Linux' && !endsWith(matrix.target, 'freebsd') && !endsWith(matrix.target, 'gnueabihf') }}
         run: upx --lzma --best ./target/$TARGET/release/net_link
       - name: Compress
@@ -322,8 +334,55 @@ jobs:
       - name: Release
         uses: svenstaro/upload-release-action@v2
         with:
-          repo_token: ${{ secrets.GITHUB_TOKEN  }}
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
           file: ./artifacts/*/netlink-*
           tag: ${{ github.ref }}
           overwrite: true
           file_glob: true
+  docker:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+      - name: List
+        run: find ./artifacts
+      - name: login github container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Dockerfile
+        run: |
+          echo "FROM alpine:latest" > /opt/Dockerfile
+          echo "ARG TARGETARCH" >> /opt/Dockerfile
+          echo "ARG TARGETVARIANT" >> /opt/Dockerfile
+          echo "ADD netlink_\$TARGETARCH\$TARGETVARIANT /usr/bin/netlink" >> /opt/Dockerfile
+          echo "RUN chmod +x /usr/bin/netlink" >> /opt/Dockerfile
+          echo "RUN apk add --no-cache tzdata" >> /opt/Dockerfile
+          echo "ENV TZ Asia/Shanghai" >> /opt/Dockerfile
+          echo "ENV LANG=zh_CN" >> /opt/Dockerfile
+          echo "EXPOSE 23333/tcp" >> /opt/Dockerfile
+          echo "EXPOSE 23333/udp" >> /opt/Dockerfile
+          echo "EXPOSE 23336/tcp" >> /opt/Dockerfile
+          echo "ENTRYPOINT [\"/usr/bin/netlink\"]" >> /opt/Dockerfile
+          mv $(find ./artifacts -type f -name "netlink-x86_64-unknown-linux-musl") /opt/netlink_amd64
+          mv $(find ./artifacts -type f -name "netlink-aarch64-unknown-linux-musl") /opt/netlink_arm64
+          mv $(find ./artifacts -type f -name "netlink-armv7-unknown-linux-musleabi") /opt/netlink_armv7
+          mv $(find ./artifacts -type f -name "netlink-arm-unknown-linux-musleabi") /opt/netlink_armv6
+      - name: Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build and Push Docker Latest Image
+        uses: docker/build-push-action@v5
+        with:
+         push: true
+         tags: |
+          ghcr.io/${{ github.repository_owner }}/netlink:${{ github.ref_name }}
+          ghcr.io/${{ github.repository_owner }}/netlink:latest
+         platforms: linux/amd64,linux/arm64,linux/arm/v7,linux/arm/v6
+         context: /opt
+      
